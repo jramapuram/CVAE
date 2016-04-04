@@ -90,71 +90,122 @@ class CVAE(object):
         optimizer = tf.train.AdamOptimizer(learning_rate=1e-3).minimize(loss)
         return loss, optimizer
 
-    def decoder(self, inputs, filter_size, num_filter_init, strides, latent_size, max_upsampled):
-        ifilters = num_filter_init; ofilters = 1
-        first_proj_size = num_filter_init * 8 * 4* 4
-        idims = [self.batch_size, first_proj_size]
+    def encoder(self, inputs, latent_size, activ=tf.identity):
+        e0 = lrelu(conv2d(inputs, self.e_dim, name="e_h0_conv"))
 
-        # first upsample so that we can start convolving
-        d0_linear = linear(inputs, first_proj_size, 'decoder_linear')
-        d0_unrolled = tf.reshape(d0_linear, [-1, 4, 4, num_filter_init*8])
-        bn = batch_norm(batch_size, name=str(idims).replace("[", "dbn_").replace("]", "").replace(", ", "_"))
-        d0 = tf.nn.relu(bn(d0_unrolled))
-        deconv = [d0]
+        bn1 = batch_norm(self.batch_size, name="e1_bn")
+        e1 = lrelu(bn1(conv2d(e0, self.e_dim*2, name="e_h1_conv")))
 
-        print 'convolutional upsampling params:'
-        while idims[0] >= filter_size[0]:
-            print '%s filter = ' % filter_size, [filter_size[0], filter_size[1],
-                                                 ifilters, ofilters], ' | input_size = ', idims,
-            idims[0] *= 2
-            idims[1] *= 2
-            bn = batch_norm(batch_size, name=str(idims).replace("[", "dbn_").replace("]", "").replace(", ", "_"))
-            deconv.append(lrelu(bn(deconv2d(inputs, ofilters, k_h=filter_size[0], k_w=filter_size[1],
-                                   d_h=filter_size[0], d_w=filter_size[1])),
-                                   name=str(idims).replace("[", "c_").replace("]", "").replace(", ", "_")))
-            ifilters = ofilters
-            ofilters = num_filter_init * 2
+        bn2 = batch_norm(self.batch_size, name="e2_bn")
+        e2 = lrelu(bn1(conv2d(e0, self.e_dim*4, name="e_h2_conv")))
 
+        bn3 = batch_norm(self.batch_size, name="e3_bn")
+        e3 = lrelu(bn1(conv2d(e0, self.e_dim*8, name="e_h3_conv")))
 
-    def encoder(self, inputs, filter_size, num_filter_init, strides, latent_size, max_downsampled):
-        ifilters = 1; ofilters = num_filter_init
-        if len(self.input_shape) == 1 :
-            idims = [self.batch_size, self.input_shape[0]]
-        else:
-            idims = [self.batch_size, self.input_shape[0], self.input_shape[1]]
-
-        inputs_unrolled = tf.reshape(inputs, [-1, 1, 1, self.input_size])
-
-        print 'convolutional downsampling params:'
-        bn = batch_norm(self.batch_size, name=str(idims).replace("[", "ebn_").replace("]", "").replace(", ", "_"))
-        c0 = lrelu(bn(conv2d(inputs_unrolled, ofilters, k_h=filter_size[0], k_w=filter_size[1],
-                          d_h=strides[0], d_w=strides[1])),
-                   name=str(idims).replace("[", "c_").replace("]", "").replace(", ", "_"))
-        print '%s filter = ' % filter_size, [filter_size[0], filter_size[1],
-                                             ifilters, ofilters], ' | input_size = ', idims,
-        idims[0] = self._div_round(idims[0], [strides[0]])
-        idims[1] = self._div_round(idims[1], [strides[1]])
-        conv = [c0]
-
-        # Add conv ops until we reach the threshold of being <= max_downsampled
-        while idims[0] >= filter_size[0] and idims[1] >= filter_size[1] and np.prod(idims) >= max_downsampled:
-            bn = batch_norm(self.batch_size, name=str(idims).replace("[", "ebn_").replace("]", "").replace(", ", "_"))
-            conv.append(lrelu(bn(conv2d(conv[-1], ofilters, k_h=filter_size[0], k_w=filter_size[1],
-                                     d_h=filter_size[0], d_w=filter_size[1])),
-                              name=str(idims).replace("[", "c_").replace("]", "").replace(", ", "_")))
-            print '%s filter = ' % filter_size, [filter_size[0], filter_size[1],
-                                                 ifilters, ofilters], ' | input_size = ', idims,
-            ifilters = ofilters
-            ofilters = num_filter_init * 2
-            # if idims[0] >= 2 and ofilters < 16:
-            #     ofilters = ofilters * 2
-            # elif idims[0] >= 2:
-            #     ofilters = ofilters / 2
-
-        unrolled = tf.reshape(conv[-1], [-1])
-        z_mean = linear(unrolled, latent_size, "z_mean")
-        z_sigma_sq = linear(unrolled, latent_size, "z_sigma_sq")
+        unrolled = tf.reshape(e3, [-1])
+        z_mean = activ(linear(unrolled, latent_size, "z_mean"))
+        z_sigma_sq = activ(linear(unrolled, latent_size, "z_sigma_sq"))
         return z_mean, z_sigma_sq
+
+    def decoder(self, z, projection_size, activ=tf.identity):
+        z_ = linear(z, self.d_dim*8*4*4, 'd_h0_lin')
+        bn0 = batch_norm(self.batch_size, name="d0_bn")
+        d0 = tf.nn.relu(bn0(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8])))
+
+        bn1 = batch_norm(self.batch_size, name="d1_bn")
+        d1 = tf.nn.relu(bn1(deconv2d(d0, [self.batch_size,
+                                          8, 8,
+                                          self.d_dim*4],
+                                     name='d_h1')))
+
+        bn2 = batch_norm(self.batch_size, name="d2_bn")
+        d2 = tf.nn.relu(bn2(deconv2d(d0, [self.batch_size,
+                                          16, 16,
+                                          self.d_dim*2],
+                                     name='d_h2')))
+
+        bn3 = batch_norm(self.batch_size, name="d3_bn")
+        d3 = tf.nn.relu(bn3(deconv2d(d0, [self.batch_size,
+                                          32, 32,
+                                          self.d_dim*1],
+                                     name='d_h3')))
+
+        d4 = tf.nn.relu(deconv2d(d0, [self.batch_size,
+                                      64, 64, 1],
+                                 name='d_h4'))
+
+        unrolled = tf.reshape(d4, [-1])
+        x_reconstr_mean = activ(linear(unrolled,
+                                       projection_size,
+                                       "z_mean_decoder"))
+        return x_reconstr_mean
+
+
+    # def decoder(self, inputs, filter_size, num_filter_init, strides, latent_size, max_upsampled):
+    #     ifilters = num_filter_init; ofilters = 1
+    #     first_proj_size = num_filter_init * 8 * 4* 4
+    #     idims = [self.batch_size, first_proj_size]
+
+    #     # first upsample so that we can start convolving
+    #     d0_linear = linear(inputs, first_proj_size, 'decoder_linear')
+    #     d0_unrolled = tf.reshape(d0_linear, [-1, 4, 4, num_filter_init*8])
+    #     bn = batch_norm(batch_size, name=str(idims).replace("[", "dbn_").replace("]", "").replace(", ", "_"))
+    #     d0 = tf.nn.relu(bn(d0_unrolled))
+    #     deconv = [d0]
+
+    #     print 'convolutional upsampling params:'
+    #     while idims[0] >= filter_size[0]:
+    #         print '%s filter = ' % filter_size, [filter_size[0], filter_size[1],
+    #                                              ifilters, ofilters], ' | input_size = ', idims,
+    #         idims[0] *= 2
+    #         idims[1] *= 2
+    #         bn = batch_norm(batch_size, name=str(idims).replace("[", "dbn_").replace("]", "").replace(", ", "_"))
+    #         deconv.append(lrelu(bn(deconv2d(inputs, ofilters, k_h=filter_size[0], k_w=filter_size[1],
+    #                                d_h=filter_size[0], d_w=filter_size[1])),
+    #                                name=str(idims).replace("[", "c_").replace("]", "").replace(", ", "_")))
+    #         ifilters = ofilters
+    #         ofilters = num_filter_init * 2
+
+
+    # def encoder(self, inputs, filter_size, num_filter_init, strides, latent_size, max_downsampled):
+    #     ifilters = 1; ofilters = num_filter_init
+    #     if len(self.input_shape) == 1 :
+    #         idims = [self.batch_size, self.input_shape[0]]
+    #     else:
+    #         idims = [self.batch_size, self.input_shape[0], self.input_shape[1]]
+
+    #     inputs_unrolled = tf.reshape(inputs, [-1, 1, 1, self.input_size])
+
+    #     print 'convolutional downsampling params:'
+    #     bn = batch_norm(self.batch_size, name=str(idims).replace("[", "ebn_").replace("]", "").replace(", ", "_"))
+    #     c0 = lrelu(bn(conv2d(inputs_unrolled, ofilters, k_h=filter_size[0], k_w=filter_size[1],
+    #                       d_h=strides[0], d_w=strides[1])),
+    #                name=str(idims).replace("[", "c_").replace("]", "").replace(", ", "_"))
+    #     print '%s filter = ' % filter_size, [filter_size[0], filter_size[1],
+    #                                          ifilters, ofilters], ' | input_size = ', idims,
+    #     idims[0] = self._div_round(idims[0], [strides[0]])
+    #     idims[1] = self._div_round(idims[1], [strides[1]])
+    #     conv = [c0]
+
+    #     # Add conv ops until we reach the threshold of being <= max_downsampled
+    #     while idims[0] >= filter_size[0] and idims[1] >= filter_size[1] and np.prod(idims) >= max_downsampled:
+    #         bn = batch_norm(self.batch_size, name=str(idims).replace("[", "ebn_").replace("]", "").replace(", ", "_"))
+    #         conv.append(lrelu(bn(conv2d(conv[-1], ofilters, k_h=filter_size[0], k_w=filter_size[1],
+    #                                  d_h=filter_size[0], d_w=filter_size[1])),
+    #                           name=str(idims).replace("[", "c_").replace("]", "").replace(", ", "_")))
+    #         print '%s filter = ' % filter_size, [filter_size[0], filter_size[1],
+    #                                              ifilters, ofilters], ' | input_size = ', idims,
+    #         ifilters = ofilters
+    #         ofilters = num_filter_init * 2
+    #         # if idims[0] >= 2 and ofilters < 16:
+    #         #     ofilters = ofilters * 2
+    #         # elif idims[0] >= 2:
+    #         #     ofilters = ofilters / 2
+
+    #     unrolled = tf.reshape(conv[-1], [-1])
+    #     z_mean = linear(unrolled, latent_size, "z_mean")
+    #     z_sigma_sq = linear(unrolled, latent_size, "z_sigma_sq")
+    #     return z_mean, z_sigma_sq
 
 
     # def build_encoder_params(self, input_size, latent_size, max_downsampled):
