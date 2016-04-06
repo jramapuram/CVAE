@@ -1,3 +1,4 @@
+import os
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,6 +47,15 @@ class CVAE(object):
         self.summaries = tf.merge_all_summaries()
         self.summary_writer = tf.train.SummaryWriter("./logs", sess.graph)
         self.saver = tf.train.Saver()
+
+    def save(self, sess):
+        print 'saving cvae model...'
+        self.saver.save(sess, "cvae.model")
+
+    def load(self, sess):
+        if os.path.isfile("cvae.model"):
+            print 'restoring cvae model...'
+            self.saver.restore(sess, "cvae.model")
 
     def _create_loss_and_optimizer(self, inputs, x_reconstr_mean, z_log_sigma_sq, z_mean):
         # The loss is composed of two terms:
@@ -224,7 +234,7 @@ class CVAE(object):
         return sess.run(self.x_reconstr_mean,
                         feed_dict=feed_dict)
 
-    def train(self, sess, source, batch_size, training_epochs=1, display_step=5):
+    def train(self, sess, source, batch_size, training_epochs=10, display_step=5):
         n_samples = source.train.num_examples
         for epoch in range(training_epochs):
             avg_cost = 0.
@@ -258,11 +268,15 @@ def main():
                   int(np.sqrt(mnist.train.images.shape[1]))
     batch_size = 128
 
-    with tf.device("/cpu:0"):
+    with tf.device("/gpu:0"):
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
             cvae = CVAE(sess, input_shape, batch_size, latent_size=2)
-            cvae.init_all(sess)
-            cvae.train(sess, mnist, batch_size, display_step=1, training_epochs=1)
+            if os.path.isfile("cvae.model"):
+                cvae.load(sess)
+            else:
+                cvae.init_all(sess)
+                cvae.train(sess, mnist, batch_size, display_step=1, training_epochs=20)
+                cvae.save(sess)
 
             x_sample, y_sample = mnist.test.next_batch(5000)
             cvae.batch_size = 5000
