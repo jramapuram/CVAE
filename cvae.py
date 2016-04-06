@@ -13,16 +13,17 @@ class CVAE(object):
     the reparameterization trick and conv/conv transpose to achieve this.
 
     '''
-    def __init__(self, input_shape, batch_size, latent_size=128, e_dim=64, d_dim=64):
+    def __init__(self, sess, input_shape, batch_size, latent_size=128, e_dim=64, d_dim=64):
         self.input_shape = input_shape
         self.input_size = np.prod(input_shape)
         self.latent_size = latent_size
         self.batch_size = batch_size
         self.e_dim = e_dim
         self.d_dim = d_dim
-        self.is_training = False
+        self.iteration = 0
 
-        self.inputs = tf.placeholder(tf.float32, [None, self.input_size])
+        self.inputs = tf.placeholder(tf.float32, [None, self.input_size], name="inputs")
+        self.is_training = tf.placeholder(tf.bool, name="is_training")
 
         # Encode our data into z and return the mean and covariance
         self.z_mean, self.z_log_sigma_sq = self.encoder(self.inputs, latent_size)
@@ -36,13 +37,14 @@ class CVAE(object):
 
         # Get the reconstructed mean from the decoder
         self.x_reconstr_mean = self.decoder(self.z, self.input_size)
-        self.x_reconstr_mean_sampler = self.sampler(self.z, self.input_size)
 
         self.loss, self.optimizer = self._create_loss_and_optimizer(self.inputs,
                                                                     self.x_reconstr_mean,
                                                                     self.z_log_sigma_sq,
                                                                     self.z_mean)
         self.loss_summary = tf.scalar_summary("loss", self.loss)
+        self.summaries = tf.merge_all_summaries()
+        self.summary_writer = tf.train.SummaryWriter("./logs", sess.graph)
         self.saver = tf.train.Saver()
 
     def _create_loss_and_optimizer(self, inputs, x_reconstr_mean, z_log_sigma_sq, z_mean):
@@ -60,7 +62,7 @@ class CVAE(object):
                            1)
         # 2.) The latent loss, which is defined as the Kullback Leibler divergence
         ##    between the distribution in latent space induced by the encoder on
-        #     the data and some prior. This acts as a kind of regularizer.
+        #     the data and some prior. This acts as a kind of regularize.
         #     This can be interpreted as the number of "nats" required
         #     for transmitting the the latent space distribution given
         #     the prior.
@@ -72,134 +74,157 @@ class CVAE(object):
         optimizer = tf.train.AdamOptimizer(learning_rate=1e-3).minimize(loss)
         return loss, optimizer
 
+    def _encode_step(self, x, outfilters, name, filter_x=5, filter_y=5):
+        def _get_conv_train():
+            return lrelu(batch_norm(conv2d(x, outfilters, name=name+"_econv",
+                                           k_h=filter_y, k_w=filter_x),
+                                    self.is_training, name=name+"_ebn"),
+                         name=name+"e_h")
+
+        def _get_conv_test():
+            return lrelu(batch_norm(conv2d(x, outfilters, name=name+"_econv",
+                                           k_h=filter_y, k_w=filter_x,
+                                           reuse=True), self.is_training,
+                                    name=name+"_ebn", reuse=True),
+                         name=name+'e_h', reuse=True)
+
+        return tf.cond(self.is_training, _get_conv_train, _get_conv_test)
+
+    def _get_cond_linear(self, x, out_dim, name, activ):
+        def _get_train():
+            return activ(linear(x, out_dim, scope=name+"_lin"),
+                         name=name)
+        def _get_test():
+            return activ(linear(x, out_dim, scope=name+"_lin", reuse=True),
+                      name=name)
+
+        return tf.cond(self.is_training, _get_train, _get_test)
+
     def encoder(self, inputs, latent_size, activ=tf.identity):
-        i = tf.reshape(inputs, [self.batch_size,
-                                self.input_shape[0],
-                                self.input_shape[1], 1])
-        e0 = lrelu(conv2d(i, self.e_dim, name="e_h0_conv"))
+        with tf.variable_scope("encoder"):
+            i = tf.reshape(inputs, [-1,
+                                    self.input_shape[0],
+                                    self.input_shape[1],
+                                    1], name="e_i")
+            def _e0_train():
+                return lrelu(conv2d(i, self.e_dim, name="e_conv0"), name="e_h0_conv")
+            def _e0_test():
+                return lrelu(conv2d(i, self.e_dim, name="e_conv0", reuse=True),
+                             name="e_h0_conv", reuse=True)
+            e0 = tf.cond(self.is_training, _e0_train, _e0_test)
 
-        bn1 = batch_norm(self.batch_size, name="e1_bn")
-        e1 = lrelu(bn1(conv2d(e0, self.e_dim*2, name="e_h1_conv")))
+            e1 = self._encode_step(e0, self.e_dim*2, name="e_conv1")
+            e2 = self._encode_step(e1, self.e_dim*4, name="e_conv2")
 
-        bn2 = batch_norm(self.batch_size, name="e2_bn")
-        e2 = lrelu(bn2(conv2d(e1, self.e_dim*4, name="e_h2_conv")))
+            result_size = self.e_dim * 4 * 16
+            unrolled = tf.reshape(e2, [-1, result_size], name="e_unrolled")
+            z_mean = self._get_cond_linear(unrolled, latent_size, "z_mean", activ)
+            z_sigma_sq = self._get_cond_linear(unrolled, latent_size, "z_sigma_sq", activ)
 
-        # bn3 = batch_norm(self.batch_size, name="e3_bn")
-        # e3 = lrelu(bn3(conv2d(e2, self.e_dim*8, name="e_h3_conv")))
+            return z_mean, z_sigma_sq
 
-        unrolled = tf.reshape(e2, [self.batch_size, -1])
-        z_mean = activ(linear(unrolled, latent_size, scope="z_mean"))
-        z_sigma_sq = activ(linear(unrolled, latent_size, scope="z_sigma_sq"))
-        return z_mean, z_sigma_sq
+    def _decode_step(self, x, filter_x, filter_y, outfilters, name):
+        def _get_deconv_train():
+            return tf.nn.relu(batch_norm(deconv2d(x, [self.batch_size,
+                                                      filter_x, filter_y,
+                                                      outfilters],
+                                                  name=name+"_dconv"),
+                                         self.is_training, name=name+"_dbn"),
+                              name=name+'d_h')
+
+        def _get_deconv_test():
+            return tf.nn.relu(batch_norm(deconv2d(x, [self.batch_size,
+                                                      filter_x, filter_y,
+                                                      outfilters],
+                                                  name=name+"_dconv", reuse=True),
+                                         self.is_training, name=name+"_dbn", reuse=True),
+                              name=name+'d_h')
+
+        return tf.cond(self.is_training, _get_deconv_train, _get_deconv_test)
 
     def decoder(self, z, projection_size, activ=tf.identity):
-        z_ = linear(z, self.d_dim*8*4*4, scope='d_h0_lin')
-        bn0 = batch_norm(self.batch_size, name="d0_bn")
-        d0 = tf.nn.relu(bn0(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8])))
+        with tf.variable_scope("decoder"):
+            z_ = self._get_cond_linear(z, self.d_dim * 8 * 4 * 4,
+                                       name="d_h0_lin", activ=tf.identity)
 
-        bn1 = batch_norm(self.batch_size, name="d1_bn")
-        d1 = tf.nn.relu(bn1(deconv2d(d0, [self.batch_size,
-                                          8, 8,
-                                          self.d_dim*4],
-                                     name='d_h1')))
+            def _d0_train():
+                return tf.nn.relu(batch_norm(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8]),
+                                             self.is_training), name="d0")
 
-        bn2 = batch_norm(self.batch_size, name="d2_bn")
-        d2 = tf.nn.relu(bn2(deconv2d(d1, [self.batch_size,
-                                          16, 16,
-                                          self.d_dim*2],
-                                     name='d_h2')))
+            def _d0_test():
+                return tf.nn.relu(batch_norm(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8]),
+                                             self.is_training, reuse=True),
+                                  name="d0")
 
-        bn3 = batch_norm(self.batch_size, name="d3_bn")
-        d3 = tf.nn.relu(bn3(deconv2d(d2, [self.batch_size,
-                                          32, 32,
-                                          self.d_dim*1],
-                                     name='d_h3')))
+            d0 = tf.cond(self.is_training, _d0_train, _d0_test)
 
-        d4 = tf.nn.relu(deconv2d(d3, [self.batch_size,
-                                      64, 64, 1],
-                                 name='d_h4'))
+            d1 = self._decode_step(d0, 8, 8, self.d_dim*4, "d_conv1")
+            d2 = self._decode_step(d1, 16, 16, self.d_dim*2, "d_conv2")
+            d3 = self._decode_step(d2, 32, 32, self.d_dim, "d_conv3")
 
-        unrolled = tf.reshape(d4, [self.batch_size, -1])
-        x_reconstr_mean = activ(linear(unrolled,
-                                       projection_size,
-                                       scope="z_mean_decoder"))
-        return x_reconstr_mean
+            def _d4_train():
+                return tf.nn.relu(deconv2d(d3, [self.batch_size, 64, 64, 1],
+                                           name="dconv4"),
+                                  name='d_h4')
 
-    def sampler(self, z, projection_size, activ=tf.identity):
-        tf.get_variable_scope().reuse_variables()
+            def _d4_test():
+                return tf.nn.relu(deconv2d(d3, [self.batch_size, 64, 64, 1],
+                                           name="dconv4", reuse=True),
+                                  name='d_h4')
 
-        z_ = linear(z, self.d_dim*8*4*4, scope='d_h0_lin')
-        bn0 = batch_norm(self.batch_size, name="d0_bn")
-        d0 = tf.nn.relu(bn0(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8])))
+            d4 = tf.cond(self.is_training, _d4_train, _d4_test)
 
-        bn1 = batch_norm(self.batch_size, name="d1_bn")
-        d1 = tf.nn.relu(bn1(deconv2d(d0, [self.batch_size,
-                                          8, 8,
-                                          self.d_dim*4],
-                                     name='d_h1')))
-
-        bn2 = batch_norm(self.batch_size, name="d2_bn")
-        d2 = tf.nn.relu(bn2(deconv2d(d1, [self.batch_size,
-                                          16, 16,
-                                          self.d_dim*2],
-                                     name='d_h2')))
-
-        bn3 = batch_norm(self.batch_size, name="d3_bn")
-        d3 = tf.nn.relu(bn3(deconv2d(d2, [self.batch_size,
-                                          32, 32,
-                                          self.d_dim*1],
-                                     name='d_h3')))
-
-        d4 = tf.nn.relu(deconv2d(d3, [self.batch_size,
-                                      64, 64, 1],
-                                 name='d_h4'))
-
-        unrolled = tf.reshape(d4, [self.batch_size, -1])
-        x_reconstr_mean = activ(linear(unrolled,
-                                       projection_size,
-                                       scope="z_mean_decoder"))
-        return x_reconstr_mean
+            result_size = self.d_dim * 4 * 16
+            unrolled = tf.reshape(d4, [-1, result_size], name="d_unrolled")
+            x_reconstr_mean = self._get_cond_linear(unrolled, projection_size,
+                                                    name="z_mean_decoder", activ=activ)
+            return x_reconstr_mean
 
     def partial_fit(self, sess, X):
         """Train model based on mini-batch of input data.
 
         Return cost of mini-batch.
         """
-        _, cost  = sess.run([self.optimizer, self.loss],
-                            feed_dict={self.inputs: X})
-        return cost
+        feed_dict = {self.inputs: X,
+                     self.is_training: True}
 
+        if self.iteration % 10 == 0:
+            _, summary, cost  = sess.run([self.optimizer, self.summaries, self.loss],
+                                         feed_dict=feed_dict)
+            self.summary_writer.add_summary(summary, self.iteration)
+        else:
+            _, cost  = sess.run([self.optimizer, self.loss],
+                                feed_dict=feed_dict)
+
+        self.iteration += 1
+        return cost
 
     def transform(self, sess, inputs):
         """Transform data by mapping it into the latent space."""
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
+        feed_dict={self.inputs: inputs,
+                   self.is_training: False}
         return sess.run(self.z_mean,
-                        feed_dict={self.inputs: inputs})
+                        feed_dict=feed_dict)
 
-    def generate(self, sess, z_mu=None):
-        """ Generate data by sampling from latent space.
-
-        If z_mu is not None, data for this point in latent space is
-        generated. Otherwise, z_mu is drawn from prior in latent
-        space.
-        """
-        if z_mu is None:
-            z_mu = np.random.normal(size=self.network_architecture["n_z"])
+    def generate(self, sess):
+        """ Generate data by sampling from latent space."""
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
-        return sess.run(self.x_reconstr_mean_sampler,
-                        feed_dict={self.z: z_mu})
+        feed_dict={self.z: z_mu,
+                   self.is_training: False}
+        return sess.run(self.x_reconstr_mean,
+                        feed_dict=feed_dict)
 
     def reconstruct(self, sess, X):
         """ Use VAE to reconstruct given data. """
-        return sess.run(self.x_reconstr_mean_sampler,
-                        feed_dict={self.x: X})
+        feed_dict={self.inputs: X,
+                   self.is_training: False}
+        return sess.run(self.x_reconstr_mean,
+                        feed_dict=feed_dict)
 
     def train(self, sess, source, batch_size, training_epochs=1, display_step=5):
-        # summaries = tf.merge_all_summaries()
-        # summary_writer = tf.train.SummaryWriter("./logs", sess.graph)
-
         n_samples = source.train.num_examples
         for epoch in range(training_epochs):
             avg_cost = 0.
@@ -219,6 +244,11 @@ class CVAE(object):
                     "current cost = ", "{:.9f} | ".format(cost), \
                     "avg cost = ", "{:.9f}".format(avg_cost)
 
+    def init_all(self, sess):
+        sess.run(tf.initialize_all_variables(), feed_dict={self.is_training: True})
+        sess.run(tf.initialize_all_variables(), feed_dict={self.is_training: False})
+
+
 
 ######## entry point ########
 def main():
@@ -228,13 +258,14 @@ def main():
                   int(np.sqrt(mnist.train.images.shape[1]))
     batch_size = 128
 
-    with tf.device("/gpu:0"):
+    with tf.device("/cpu:0"):
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
-            cvae = CVAE(input_shape, batch_size, latent_size=2)
-            sess.run(tf.initialize_all_variables())
-            cvae.train(sess, mnist, batch_size, display_step=1)
+            cvae = CVAE(sess, input_shape, batch_size, latent_size=2)
+            cvae.init_all(sess)
+            cvae.train(sess, mnist, batch_size, display_step=1, training_epochs=1)
 
             x_sample, y_sample = mnist.test.next_batch(5000)
+            cvae.batch_size = 5000
             z_mu = cvae.transform(sess, x_sample)
             plt.figure(figsize=(8, 6))
             plt.scatter(z_mu[:, 0], z_mu[:, 1], c=np.argmax(y_sample, 1))

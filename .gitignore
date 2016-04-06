@@ -89,3 +89,6 @@ ENV/
 
 # MNIST Data
 MNIST_data/
+
+# TF data
+logs/
