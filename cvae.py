@@ -1,4 +1,6 @@
 import os
+import sys
+import datetime
 import tensorflow as tf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -31,7 +33,7 @@ class CVAE(object):
 
         # z = mu + sigma * epsilon
         # epsilon is a sample from a N(0, 1) distribution
-        eps = tf.random_normal([batch_size, latent_size], 0.0, 1.0, dtype=tf.float32)
+        eps = tf.random_normal([self.batch_size, latent_size], 0.0, 1.0, dtype=tf.float32)
         self.z = tf.add(self.z_mean,
                         tf.mul(tf.sqrt(tf.exp(self.z_log_sigma_sq)), eps))
         self.z_summary = tf.histogram_summary("z", self.z)
@@ -45,18 +47,21 @@ class CVAE(object):
                                                                     self.z_mean)
         self.loss_summary = tf.scalar_summary("loss", self.loss)
         self.summaries = tf.merge_all_summaries()
-        self.summary_writer = tf.train.SummaryWriter("./logs", sess.graph)
+        timestamp = str(datetime.datetime.now()).replace(" ", "_")
+        params = "_" + str(batch_size)+ "_" + str(latent_size)
+        self.summary_writer = tf.train.SummaryWriter("logs/" + timestamp + params, sess.graph)
         self.saver = tf.train.Saver()
 
-    def save(self, sess):
-        print 'saving cvae model...'
-        self.saver.save(sess, "cvae.model")
+    def save(self, sess, filename):
+        print 'saving cvae model to %s...' % filename
+        self.saver.save(sess, filename)
 
-    def load(self, sess):
-        if os.path.isfile("cvae.model"):
-            print 'restoring cvae model...'
-            self.saver.restore(sess, "cvae.model")
+    def load(self, sess, filename):
+        if os.path.isfile(filename):
+            print 'restoring cvae model from %s...' % filename
+            self.saver.restore(sess, filename)
 
+    # Taken from https://jmetzen.github.io/2015-11-27/vae.html
     def _create_loss_and_optimizer(self, inputs, x_reconstr_mean, z_log_sigma_sq, z_mean):
         # The loss is composed of two terms:
         # 1.) The reconstruction loss (the negative log probability
@@ -81,10 +86,10 @@ class CVAE(object):
                                            - tf.exp(z_log_sigma_sq), 1)
         loss = tf.reduce_mean(self.reconstr_loss + self.latent_loss)   # average over batch
 
-        optimizer = tf.train.AdamOptimizer(learning_rate=1e-3).minimize(loss)
+        optimizer = tf.train.AdamOptimizer(learning_rate=1e-4).minimize(loss)
         return loss, optimizer
 
-    def _encode_step(self, x, outfilters, name, filter_x=5, filter_y=5):
+    def _encode_step(self, x, outfilters, name, filter_x=3, filter_y=3):
         def _get_conv_train():
             return lrelu(batch_norm(conv2d(x, outfilters, name=name+"_econv",
                                            k_h=filter_y, k_w=filter_x),
@@ -101,33 +106,40 @@ class CVAE(object):
         return tf.cond(self.is_training, _get_conv_train, _get_conv_test)
 
     def _get_cond_linear(self, x, out_dim, name, activ):
+        print 'linear map: %s --> %s' % (str(x.get_shape().as_list()), str(out_dim))
         def _get_train():
             return activ(linear(x, out_dim, scope=name+"_lin"),
                          name=name)
+
         def _get_test():
             return activ(linear(x, out_dim, scope=name+"_lin", reuse=True),
                       name=name)
 
         return tf.cond(self.is_training, _get_train, _get_test)
 
-    def encoder(self, inputs, latent_size, activ=tf.identity):
+    def encoder(self, inputs, latent_size, activ=tf.nn.tanh):
         with tf.variable_scope("encoder"):
-            i = tf.reshape(inputs, [-1,
+            m,v = tf.nn.moments(inputs, axes=[0])
+            normalized_inputs = (inputs - m)/(v + 1e-9)
+            i = tf.reshape(normalized_inputs, [-1,
                                     self.input_shape[0],
                                     self.input_shape[1],
                                     1], name="e_i")
             def _e0_train():
                 return lrelu(conv2d(i, self.e_dim, name="e_conv0"), name="e_h0_conv")
+
             def _e0_test():
                 return lrelu(conv2d(i, self.e_dim, name="e_conv0", reuse=True),
                              name="e_h0_conv", reuse=True)
+
             e0 = tf.cond(self.is_training, _e0_train, _e0_test)
 
             e1 = self._encode_step(e0, self.e_dim*2, name="e_conv1")
             e2 = self._encode_step(e1, self.e_dim*4, name="e_conv2")
+            e3 = self._encode_step(e2, self.e_dim*8, name="e_conv3")
 
-            result_size = self.e_dim * 4 * 16
-            unrolled = tf.reshape(e2, [-1, result_size], name="e_unrolled")
+            result_size = self.e_dim * 4 * 16 / 2 # /2 added for e3
+            unrolled = tf.reshape(e3, [-1, result_size], name="e_unrolled")
             z_mean = self._get_cond_linear(unrolled, latent_size, "z_mean", activ)
             z_sigma_sq = self._get_cond_linear(unrolled, latent_size, "z_sigma_sq", activ)
 
@@ -152,10 +164,10 @@ class CVAE(object):
 
         return tf.cond(self.is_training, _get_deconv_train, _get_deconv_test)
 
-    def decoder(self, z, projection_size, activ=tf.identity):
+    def decoder(self, z, projection_size, activ=tf.nn.tanh):
         with tf.variable_scope("decoder"):
             z_ = self._get_cond_linear(z, self.d_dim * 8 * 4 * 4,
-                                       name="d_h0_lin", activ=tf.identity)
+                                       name="d_h0_lin", activ=activ)
 
             def _d0_train():
                 return tf.nn.relu(batch_norm(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8]),
@@ -178,6 +190,7 @@ class CVAE(object):
                                   name='d_h4')
 
             def _d4_test():
+                d3shape = d3.get_shape().as_list()
                 return tf.nn.relu(deconv2d(d3, [self.batch_size, 64, 64, 1],
                                            name="dconv4", reuse=True),
                                   name='d_h4')
@@ -187,7 +200,7 @@ class CVAE(object):
             result_size = self.d_dim * 4 * 16
             unrolled = tf.reshape(d4, [-1, result_size], name="d_unrolled")
             x_reconstr_mean = self._get_cond_linear(unrolled, projection_size,
-                                                    name="z_mean_decoder", activ=activ)
+                                                    name="z_mean_decoder", activ=tf.nn.sigmoid)
             return x_reconstr_mean
 
     def partial_fit(self, sess, X):
@@ -210,7 +223,10 @@ class CVAE(object):
         return cost
 
     def transform(self, sess, inputs):
-        """Transform data by mapping it into the latent space."""
+        """
+        Transform data by mapping it into the latent space.
+        Taken from https://jmetzen.github.io/2015-11-27/vae.html
+        """
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
         feed_dict={self.inputs: inputs,
@@ -219,7 +235,10 @@ class CVAE(object):
                         feed_dict=feed_dict)
 
     def generate(self, sess):
-        """ Generate data by sampling from latent space."""
+        """
+        Generate data by sampling from latent space.
+        Taken from https://jmetzen.github.io/2015-11-27/vae.html
+        """
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
         feed_dict={self.z: z_mu,
@@ -228,7 +247,10 @@ class CVAE(object):
                         feed_dict=feed_dict)
 
     def reconstruct(self, sess, X):
-        """ Use VAE to reconstruct given data. """
+        """
+        Use VAE to reconstruct given data.
+        Taken from https://jmetzen.github.io/2015-11-27/vae.html
+        """
         feed_dict={self.inputs: X,
                    self.is_training: False}
         return sess.run(self.x_reconstr_mean,
@@ -261,6 +283,57 @@ class CVAE(object):
 
 
 ######## entry point ########
+def build_2d_cvae(source, input_shape, batch_size, epochs=200):
+    with tf.device("/gpu:0"):
+        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+            with tf.variable_scope("2dvae"):
+                model_filename = "models/cvae2d_%s_%d_2d.model" % (str(input_shape), batch_size)
+                cvae = CVAE(sess, input_shape, batch_size, latent_size=2)
+                if os.path.isfile(model_filename):
+                    cvae.load(sess, model_filename)
+                else:
+                    cvae.init_all(sess)
+                    cvae.train(sess, source, batch_size, display_step=1, training_epochs=epochs)
+                    cvae.save(sess, model_filename)
+
+                # show clustering in 2d
+                x_sample, y_sample = source.test.next_batch(5000)
+                z_mu = cvae.transform(sess, x_sample)
+                plt.figure(figsize=(8, 6))
+                plt.scatter(z_mu[:, 0], z_mu[:, 1], c=np.argmax(y_sample, 1))
+                plt.colorbar()
+                plt.savefig("models/2d_cluster.png", bbox_inches='tight')
+                #plt.show()
+
+def build_20d_cvae(source, input_shape, batch_size, epochs=200):
+    with tf.device("/gpu:0"):
+        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
+            with tf.variable_scope("20dvae"):
+                model_filename = "models/cvae2d_%s_%d_20d.model" % (str(input_shape), batch_size)
+                cvae = CVAE(sess, input_shape, batch_size, latent_size=20)
+                if os.path.isfile(model_filename):
+                    cvae.load(sess, model_filename)
+                else:
+                    cvae.init_all(sess)
+                    cvae.train(sess, source, batch_size, display_step=1, training_epochs=epochs)
+                    cvae.save(sess, model_filename)
+
+                # show reconstruction
+                x_sample = source.test.next_batch(batch_size)[0]
+                x_reconstruct = cvae.reconstruct(sess, x_sample)
+                plt.figure(figsize=(8, 12))
+                for i in range(5):
+                    plt.subplot(5, 2, 2*i + 1)
+                    plt.imshow(x_sample[i].reshape(28, 28), vmin=0, vmax=1)
+                    plt.title("Test input")
+                    plt.colorbar()
+                    plt.subplot(5, 2, 2*i + 2)
+                    plt.imshow(x_reconstruct[i].reshape(28, 28), vmin=0, vmax=1)
+                    plt.title("Reconstruction")
+                    plt.colorbar()
+                    plt.savefig("models/20d_reconstr_%d.png" % i, bbox_inches='tight')
+                    #plt.show()
+
 def main():
     from tensorflow.examples.tutorials.mnist import input_data
     mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
@@ -268,25 +341,16 @@ def main():
                   int(np.sqrt(mnist.train.images.shape[1]))
     batch_size = 128
 
-    with tf.device("/gpu:0"):
-        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
-            cvae = CVAE(sess, input_shape, batch_size, latent_size=2)
-            if os.path.isfile("cvae.model"):
-                cvae.load(sess)
-            else:
-                cvae.init_all(sess)
-                cvae.train(sess, mnist, batch_size, display_step=1, training_epochs=20)
-                cvae.save(sess)
+    # model storage
+    if not os.path.exists('models'):
+        os.makedirs('models')
 
-            x_sample, y_sample = mnist.test.next_batch(5000)
-            cvae.batch_size = 5000
-            z_mu = cvae.transform(sess, x_sample)
-            plt.figure(figsize=(8, 6))
-            plt.scatter(z_mu[:, 0], z_mu[:, 1], c=np.argmax(y_sample, 1))
-            plt.colorbar()
-            plt.show()
-
-
+    if str(sys.argv[1]) == '2d':
+        build_2d_cvae(mnist, input_shape, batch_size, epochs=400)
+    elif str(sys.argv[1]) == '20d':
+        build_20d_cvae(mnist, input_shape, batch_size, epochs=400)
+    else:
+        raise Exception("please specify 2d or 20d")
 
 
 if __name__ == "__main__":

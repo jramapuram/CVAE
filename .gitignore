@@ -92,6 +92,4 @@ MNIST_data/
 
 # TF data
 logs/
-cvae.model
-checkpoint
-cvae.model.meta
+models/

@@ -26,25 +26,27 @@ def batch_norm(x, is_train, epsilon=1e-5, affine=True, reuse=False, name='bn'):
     """
     with tf.variable_scope(name, reuse=reuse):
         shape = x.get_shape().as_list()
-        beta = tf.Variable(tf.constant(0.0, shape=[shape[-1]]),
-            name='beta', trainable=True)
-        gamma = tf.Variable(tf.constant(1.0, shape=[shape[-1]]),
-            name='gamma', trainable=affine)
+        gamma = tf.get_variable("gamma", [shape[-1]],
+                                initializer=tf.random_normal_initializer(1., 0.02))
+        beta = tf.get_variable("beta", [shape[-1]],
+                               initializer=tf.constant_initializer(0.))
 
-        batch_mean, batch_var = tf.nn.moments(x, [0,1,2], name='moments')
+        batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2], name='moments')
         ema = tf.train.ExponentialMovingAverage(decay=0.9)
         ema_apply_op = ema.apply([batch_mean, batch_var])
         ema_mean, ema_var = ema.average(batch_mean), ema.average(batch_var)
         def mean_var_with_update():
             with tf.control_dependencies([ema_apply_op]):
                 return tf.identity(batch_mean), tf.identity(batch_var)
+
         mean, var = tf.cond(is_train,
                             mean_var_with_update,
                             lambda: (ema_mean, ema_var))
 
-        normed = tf.nn.batch_norm_with_global_normalization(x, mean, var,
-            beta, gamma, epsilon, affine)
-    return normed
+        return tf.nn.batch_norm_with_global_normalization(x, mean, var,
+                                                          beta, gamma,
+                                                          epsilon, affine)
+    #return tf.identity(x)
 
 def binary_cross_entropy_with_logits(logits, targets, name=None):
     """Computes binary cross entropy given `logits`.
@@ -79,6 +81,7 @@ def conv_cond_concat(x, y):
 
 def conv2d(input_, output_dim, k_h=5, k_w=5, d_h=2, d_w=2, name="conv2d", reuse=False):
     with tf.variable_scope(name, reuse=reuse):
+        print 'conv input: ', input_.get_shape().as_list()
         w = tf.get_variable('w', [k_h, k_w, input_.get_shape()[-1], output_dim],
                             initializer=tf.contrib.layers.xavier_initializer_conv2d())
         conv = tf.nn.conv2d(input_, w, strides=[1, d_h, d_w, 1], padding='SAME')
@@ -91,6 +94,9 @@ def conv2d(input_, output_dim, k_h=5, k_w=5, d_h=2, d_w=2, name="conv2d", reuse=
 
 def deconv2d(input_, output_shape, k_h=5, k_w=5, d_h=2, d_w=2, name="deconv2d", with_w=False, reuse=False):
     with tf.variable_scope(name, reuse=reuse):
+        print 'deconv input: ', input_.get_shape().as_list(), \
+            " | output shape: ", output_shape
+
         # filter : [height, width, output_channels, in_channels]
         w = tf.get_variable('w', [k_h, k_h, output_shape[-1], input_.get_shape()[-1]],
                             initializer=tf.contrib.layers.xavier_initializer_conv2d())
