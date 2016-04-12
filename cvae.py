@@ -164,10 +164,10 @@ class CVAE(object):
 
         return tf.cond(self.is_training, _get_deconv_train, _get_deconv_test)
 
-    def decoder(self, z, projection_size, activ=tf.nn.tanh):
+    def decoder(self, z, projection_size, activ=tf.nn.elu):
         with tf.variable_scope("decoder"):
             z_ = self._get_cond_linear(z, self.d_dim * 8 * 4 * 4,
-                                       name="d_h0_lin", activ=activ)
+                                       name="d_h0_lin", activ=tf.identity)
 
             def _d0_train():
                 return tf.nn.relu(batch_norm(tf.reshape(z_, [-1, 4, 4, self.d_dim * 8]),
