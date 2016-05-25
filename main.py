@@ -19,7 +19,7 @@ def build_Nd_cvae(sess, source, input_shape, latent_size, batch_size, epochs=100
     if os.path.isfile(model_filename):
         cvae.load(sess, model_filename)
     else:
-        cvae.init_all(sess)
+        sess.run(tf.initialize_all_variables())
         cvae.train(sess, source, batch_size, display_step=1, training_epochs=epochs)
         cvae.save(sess, model_filename)
 

@@ -21,28 +21,35 @@ class CVAE(object):
         self.input_shape = input_shape
         self.input_size = np.prod(input_shape)
         self.latent_size = latent_size
-        self.batch_size = batch_size
         self.e_dim = e_dim
         self.d_dim = d_dim
         self.iteration = 0
 
         with tf.variable_scope(self.get_name()):
             self.inputs = tf.placeholder(tf.float32, [None, self.input_size], name="inputs")
-            self.is_training = tf.placeholder(tf.bool, name="is_training")
-
-            # Encode our data into z and return the mean and covariance
-            self.z_mean, self.z_log_sigma_sq = self.encoder(self.inputs, latent_size)
 
             # z = mu + sigma * epsilon
             # epsilon is a sample from a N(0, 1) distribution
             eps = tf.random_normal([batch_size, latent_size], 0.0, 1.0, dtype=tf.float32)
-            self.z = tf.add(self.z_mean,
-                            tf.mul(self.z_log_sigma_sq, eps))
+            with tf.variable_scope("z"): # Encode our data into z and return the mean and covariance
+                self.z_mean, self.z_log_sigma_sq = self.encoder(self.inputs, latent_size)
+                self.z = tf.add(self.z_mean,
+                                tf.mul(self.z_log_sigma_sq, eps))
+                # Get the reconstructed mean from the decoder
+                self.x_reconstr_mean = self.decoder(self.z, self.input_size)
+
+
+            with tf.variable_scope("z", reuse=True): # The test z
+                self.z_mean_test, self.z_log_sigma_sq_test = self.encoder(self.inputs, latent_size, phase=pt.Phase.test)
+                self.z_test = tf.add(self.z_mean_test,
+                                     tf.mul(self.z_log_sigma_sq_test, eps))
+                # Get the reconstructed mean from the decoder
+                self.x_reconstr_mean_test = self.decoder(self.z_test, self.input_size)
+
+
             self.z_summary = tf.histogram_summary("z", self.z)
 
-            # Get the reconstructed mean from the decoder
-            self.x_reconstr_mean = self.decoder(self.z, self.input_size)
-
+            # Optimize only on the training variables
             self.loss, self.optimizer = self._create_loss_and_optimizer(self.inputs,
                                                                         self.x_reconstr_mean,
                                                                         self.z_log_sigma_sq,
@@ -63,9 +70,8 @@ class CVAE(object):
             self.saver.restore(sess, filename)
 
     def get_name(self):
-        return "cvae_input_%dx%d_batch%d_latent%d_edim%d_ddim%d" % (self.input_shape[0],
+        return "cvae_input_%dx%d_latent%d_edim%d_ddim%d" % (self.input_shape[0],
                                                                     self.input_shape[1],
-                                                                    self.batch_size,
                                                                     self.latent_size,
                                                                     self.e_dim,
                                                                     self.d_dim)
@@ -95,8 +101,8 @@ class CVAE(object):
         #     for transmitting the the latent space distribution given
         #     the prior.
         self.latent_loss = -0.5 * tf.reduce_sum(1.0 + z_log_sigma_sq
-                                           - tf.square(z_mean)
-                                           - tf.exp(z_log_sigma_sq), 1)
+                                                - tf.square(z_mean)
+                                                - tf.exp(z_log_sigma_sq), 1)
         loss = tf.reduce_mean(self.reconstr_loss + self.latent_loss)   # average over batch
 
         optimizer = tf.train.AdamOptimizer(learning_rate=1e-4).minimize(loss)
@@ -117,18 +123,18 @@ class CVAE(object):
                     deconv2d(5, 1, stride=2, activation_fn=tf.nn.sigmoid).
                     flatten()).tensor
 
-    def encoder(self, inputs, latent_size, activ=tf.nn.elu):
+    def encoder(self, inputs, latent_size, phase=pt.Phase.train, activ=tf.nn.elu):
         with pt.defaults_scope(activation_fn=activ,
-                           batch_normalize=True,
-                           learned_moments_update_rate=0.0003,
-                           variance_epsilon=0.001,
-                           scale_after_normalization=True):
+                               batch_normalize=True,
+                               learned_moments_update_rate=0.0003,
+                               variance_epsilon=0.001,
+                               scale_after_normalization=True):
             params = (pt.wrap(inputs).
                       reshape([-1, self.input_shape[0], self.input_shape[1], 1]).
                       conv2d(5, 32, stride=2).
                       conv2d(5, 64, stride=2).
                       conv2d(5, 128, edges='VALID').
-                      dropout(0.9).
+                      dropout(keep_prob=0.5, phase=phase).
                       flatten().
                       fully_connected(self.latent_size * 2, activation_fn=None)).tensor
 
@@ -136,13 +142,12 @@ class CVAE(object):
         stddev = tf.sqrt(tf.exp(params[:, self.latent_size:]))
         return [mean, stddev]
 
-    def partial_fit(self, sess, X):
+    def partial_fit(self, sess, inputs):
         """Train model based on mini-batch of input data.
 
         Return cost of mini-batch.
         """
-        feed_dict = {self.inputs: X,
-                     self.is_training: True}
+        feed_dict = {self.inputs: inputs}
 
         if self.iteration % 10 == 0:
             _, summary, cost  = sess.run([self.optimizer, self.summaries, self.loss],
@@ -162,21 +167,19 @@ class CVAE(object):
         """
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
-        feed_dict={self.inputs: inputs,
-                   self.is_training: False}
-        return sess.run(self.z_mean,
+        feed_dict={self.inputs: inputs}
+        return sess.run(self.z_mean_test,
                         feed_dict=feed_dict)
 
-    def generate(self, sess):
+    def generate(self, sess, z_mu):
         """
         Generate data by sampling from latent space.
         Taken from https://jmetzen.github.io/2015-11-27/vae.html
         """
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
-        feed_dict={self.z: z_mu,
-                   self.is_training: False}
-        return sess.run(self.x_reconstr_mean,
+        feed_dict={self.z_test: z_mu}
+        return sess.run(self.x_reconstr_mean_test,
                         feed_dict=feed_dict)
 
     def reconstruct(self, sess, X):
@@ -184,9 +187,8 @@ class CVAE(object):
         Use VAE to reconstruct given data.
         Taken from https://jmetzen.github.io/2015-11-27/vae.html
         """
-        feed_dict={self.inputs: X,
-                   self.is_training: False}
-        return sess.run(self.x_reconstr_mean,
+        feed_dict={self.inputs: X}
+        return sess.run(self.x_reconstr_mean_test,
                         feed_dict=feed_dict)
 
     def train(self, sess, source, batch_size, training_epochs=10, display_step=5):
@@ -204,11 +206,7 @@ class CVAE(object):
                 avg_cost += cost / n_samples * batch_size
 
             # Display logs per epoch step
-            #if epoch % display_step == 0:
+            if epoch > display_step and epoch % display_step == 0:
                 print "[Epoch:", '%04d]' % (epoch+1), \
                     "current cost = ", "{:.9f} | ".format(cost), \
                     "avg cost = ", "{:.9f}".format(avg_cost)
-
-    def init_all(self, sess):
-        sess.run(tf.initialize_all_variables(), feed_dict={self.is_training: True})
-        sess.run(tf.initialize_all_variables(), feed_dict={self.is_training: False})
