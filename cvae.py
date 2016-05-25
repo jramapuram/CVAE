@@ -206,7 +206,7 @@ class CVAE(object):
                 avg_cost += cost / n_samples * batch_size
 
             # Display logs per epoch step
-            if epoch > display_step and epoch % display_step == 0:
+            if epoch % display_step == 0:
                 print "[Epoch:", '%04d]' % (epoch+1), \
                     "current cost = ", "{:.9f} | ".format(cost), \
                     "avg cost = ", "{:.9f}".format(avg_cost)
