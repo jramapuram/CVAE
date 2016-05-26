@@ -38,7 +38,8 @@ class deconv2d(prettytensor.VarStoreMethod):
                stddev=None,
                bias=True,
                edges=PAD_SAME,
-               batch_normalize=False):
+               batch_normalize=False,
+               phase=Phase.train):
     """Adds a convolution to the stack of operations.
 
     The current head must be a rank 4 Tensor.
@@ -118,7 +119,7 @@ class deconv2d(prettytensor.VarStoreMethod):
         tf.reduce_mean(
             layers.spatial_slice_zeros(y)), '%s/zeros_spatial' % y.op.name)
     if batch_normalize:
-      y = input_layer.with_tensor(y).batch_normalize()
+      y = input_layer.with_tensor(y).batch_normalize(phase=phase)
     if activation_fn is not None:
       if not isinstance(activation_fn, collections.Sequence):
         activation_fn = (activation_fn,)
