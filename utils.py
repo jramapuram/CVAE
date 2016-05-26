@@ -79,45 +79,6 @@ def conv_cond_concat(x, y):
     y_shapes = y.get_shape()
     return tf.concat(3, [x, y*tf.ones([x_shapes[0], x_shapes[1], x_shapes[2], y_shapes[3]])])
 
-def conv2d(input_, output_dim, k_h=5, k_w=5, d_h=2, d_w=2, name="conv2d", reuse=False):
-    with tf.variable_scope(name, reuse=reuse):
-        print 'conv input: ', input_.get_shape().as_list()
-        w = tf.get_variable('w', [k_h, k_w, input_.get_shape()[-1], output_dim],
-                            initializer=tf.contrib.layers.xavier_initializer_conv2d())
-        conv = tf.nn.conv2d(input_, w, strides=[1, d_h, d_w, 1], padding='SAME')
-
-        biases = tf.get_variable('biases', [output_dim], initializer=tf.constant_initializer(0.0))
-        #conv = tf.reshape(tf.nn.bias_add(conv, biases), conv.get_shape())
-        conv = tf.nn.bias_add(conv, biases)
-
-        return conv
-
-def deconv2d(input_, output_shape, k_h=5, k_w=5, d_h=2, d_w=2, name="deconv2d", with_w=False, reuse=False):
-    with tf.variable_scope(name, reuse=reuse):
-        print 'deconv input: ', input_.get_shape().as_list(), \
-            " | output shape: ", output_shape
-
-        # filter : [height, width, output_channels, in_channels]
-        w = tf.get_variable('w', [k_h, k_h, output_shape[-1], input_.get_shape()[-1]],
-                            initializer=tf.contrib.layers.xavier_initializer_conv2d())
-
-        try:
-            deconv = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
-                                strides=[1, d_h, d_w, 1])
-
-        # Support for verisons of TensorFlow before 0.7.0
-        except AttributeError:
-            deconv = tf.nn.deconv2d(input_, w, output_shape=output_shape,
-                                strides=[1, d_h, d_w, 1])
-
-        biases = tf.get_variable('biases', [output_shape[-1]], initializer=tf.constant_initializer(0.0))
-        deconv = tf.reshape(tf.nn.bias_add(deconv, biases), deconv.get_shape())
-
-        if with_w:
-            return deconv, w, biases
-        else:
-            return deconv
-
 def lrelu(x, leak=0.2, name="lrelu", reuse=False):
     with tf.variable_scope(name, reuse=reuse):
         f1 = 0.5 * (1 + leak)

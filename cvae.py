@@ -5,6 +5,7 @@ import tensorflow as tf
 import numpy as np
 import prettytensor as pt
 from convolutional_vae_util import deconv2d
+from sklearn.preprocessing import Normalizer
 
 from utils import *
 
@@ -77,7 +78,7 @@ class CVAE(object):
                                                                     self.d_dim)
     def get_formatted_datetime(self):
         return str(datetime.datetime.now()).replace(" ", "_") \
-                                           .replace("-", "_") \
+                                          .replace("-", "_") \
                                            .replace(":", "_")
 
     # Taken from https://jmetzen.github.io/2015-11-27/vae.html
@@ -104,8 +105,8 @@ class CVAE(object):
                                                 - tf.square(z_mean)
                                                 - tf.exp(z_log_sigma_sq), 1)
         loss = tf.reduce_mean(self.reconstr_loss + self.latent_loss)   # average over batch
+        optimizer = tf.train.AdamOptimizer(learning_rate=1e-3).minimize(loss)
 
-        optimizer = tf.train.AdamOptimizer(learning_rate=1e-4).minimize(loss)
         return loss, optimizer
 
 
@@ -136,7 +137,6 @@ class CVAE(object):
                       conv2d(5, 32, stride=2).
                       conv2d(5, 64, stride=2).
                       conv2d(5, 128, edges='VALID').
-                      dropout(keep_prob=0.5, phase=phase).
                       flatten().
                       fully_connected(self.latent_size * 2, activation_fn=None)).tensor
 
@@ -149,6 +149,7 @@ class CVAE(object):
 
         Return cost of mini-batch.
         """
+        inputs = Normalizer().fit_transform(inputs)
         feed_dict = {self.inputs: inputs}
 
         if self.iteration % 10 == 0:
@@ -169,6 +170,7 @@ class CVAE(object):
         """
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
+        inputs = Normalizer().fit_transform(inputs)
         feed_dict={self.inputs: inputs}
         return sess.run(self.z_mean_test,
                         feed_dict=feed_dict)
@@ -189,6 +191,7 @@ class CVAE(object):
         Use VAE to reconstruct given data.
         Taken from https://jmetzen.github.io/2015-11-27/vae.html
         """
+        X = Normalizer().fit_transform(X)
         feed_dict={self.inputs: X}
         return sess.run(self.x_reconstr_mean_test,
                         feed_dict=feed_dict)
@@ -201,6 +204,7 @@ class CVAE(object):
             # Loop over all batches
             for i in range(total_batch):
                 batch_xs, _ = source.train.next_batch(batch_size)
+                #batch_xs = (batch_xs - np.mean(batch_xs)) / (np.var(batch_xs) + 1e-9)
 
                 # Fit training using batch data
                 cost = self.partial_fit(sess, batch_xs)
