@@ -34,7 +34,7 @@ class CVAE(object):
             with tf.variable_scope("z"): # Encode our data into z and return the mean and covariance
                 self.z_mean, self.z_log_sigma_sq = self.encoder(self.inputs, latent_size)
                 self.z = tf.add(self.z_mean,
-                                tf.mul(self.z_log_sigma_sq, eps))
+                                tf.mul(tf.sqrt(tf.exp(self.z_log_sigma_sq)), eps))
                 # Get the reconstructed mean from the decoder
                 self.x_reconstr_mean = self.decoder(self.z, self.input_size)
                 self.z_summary = tf.histogram_summary("z", self.z)
@@ -43,7 +43,7 @@ class CVAE(object):
             with tf.variable_scope("z", reuse=True): # The test z
                 self.z_mean_test, self.z_log_sigma_sq_test = self.encoder(self.inputs, latent_size, phase=pt.Phase.test)
                 self.z_test = tf.add(self.z_mean_test,
-                                     tf.mul(self.z_log_sigma_sq_test, eps))
+                                     tf.mul(tf.sqrt(tf.exp(self.z_log_sigma_sq_test)), eps))
                 # Get the reconstructed mean from the decoder
                 self.x_reconstr_mean_test = self.decoder(self.z_test, self.input_size, phase=pt.Phase.test)
 
@@ -139,7 +139,7 @@ class CVAE(object):
                       fully_connected(self.latent_size * 2, activation_fn=None)).tensor
 
         mean = params[:, :self.latent_size]
-        stddev = tf.sqrt(tf.exp(params[:, self.latent_size:]))
+        stddev = params[:, self.latent_size:]
         return [mean, stddev]
 
     def partial_fit(self, sess, inputs):
