@@ -27,7 +27,7 @@ def build_Nd_cvae(sess, source, input_shape, latent_size, batch_size, epochs=100
 
 # show clustering in 2d
 def plot_2d_cvae(sess, source, cvae):
-    x_sample, y_sample = source.test.next_batch(5000)
+    x_sample, y_sample = source.test.next_batch(10000)
     z_mu = cvae.transform(sess, x_sample)
     plt.figure(figsize=(8, 6))
     plt.scatter(z_mu[:, 0], z_mu[:, 1], c=np.argmax(y_sample, 1))

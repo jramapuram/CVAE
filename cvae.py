@@ -5,7 +5,6 @@ import tensorflow as tf
 import numpy as np
 import prettytensor as pt
 from convolutional_vae_util import deconv2d
-from sklearn.preprocessing import Normalizer
 
 from utils import *
 
@@ -38,6 +37,7 @@ class CVAE(object):
                                 tf.mul(self.z_log_sigma_sq, eps))
                 # Get the reconstructed mean from the decoder
                 self.x_reconstr_mean = self.decoder(self.z, self.input_size)
+                self.z_summary = tf.histogram_summary("z", self.z)
 
 
             with tf.variable_scope("z", reuse=True): # The test z
@@ -47,8 +47,6 @@ class CVAE(object):
                 # Get the reconstructed mean from the decoder
                 self.x_reconstr_mean_test = self.decoder(self.z_test, self.input_size, phase=pt.Phase.test)
 
-
-            self.z_summary = tf.histogram_summary("z", self.z)
 
             # Optimize only on the training variables
             self.loss, self.optimizer = self._create_loss_and_optimizer(self.inputs,
@@ -78,7 +76,7 @@ class CVAE(object):
                                                                     self.d_dim)
     def get_formatted_datetime(self):
         return str(datetime.datetime.now()).replace(" ", "_") \
-                                          .replace("-", "_") \
+                                           .replace("-", "_") \
                                            .replace(":", "_")
 
     # Taken from https://jmetzen.github.io/2015-11-27/vae.html
@@ -90,7 +88,6 @@ class CVAE(object):
         #     This can be interpreted as the number of "nats" required
         #     for reconstructing the input when the activation in latent
         #     is given.
-        # Adding 1e-10 to avoid evaluation of log(0.0)
         self.reconstr_loss = \
             -tf.reduce_sum(inputs * tf.log(tf.clip_by_value(x_reconstr_mean, 1e-10, 1.0))
                            + (1.0 - inputs) * tf.log(tf.clip_by_value(1.0 - x_reconstr_mean, 1e-10, 1.0)),
@@ -105,7 +102,7 @@ class CVAE(object):
                                                 - tf.square(z_mean)
                                                 - tf.exp(z_log_sigma_sq), 1)
         loss = tf.reduce_mean(self.reconstr_loss + self.latent_loss)   # average over batch
-        optimizer = tf.train.AdamOptimizer(learning_rate=1e-3).minimize(loss)
+        optimizer = tf.train.AdamOptimizer(learning_rate=1e-4).minimize(loss)
 
         return loss, optimizer
 
@@ -115,14 +112,14 @@ class CVAE(object):
                                batch_normalize=True,
                                learned_moments_update_rate=0.0003,
                                variance_epsilon=0.001,
-                               scale_after_normalization=True,
-                               phase=phase):
+                               scale_after_normalization=True):
+                               #phase=phase):
             return (pt.wrap(z).
                     reshape([-1, 1, 1, self.latent_size]).
-                    deconv2d(3, 128, edges='VALID', phase=phase).
-                    deconv2d(5, 64, edges='VALID', phase=phase).
-                    deconv2d(5, 32, stride=2, phase=phase).
-                    deconv2d(5, 1, stride=2, activation_fn=tf.nn.sigmoid, phase=phase).
+                    deconv2d(3, 128, edges='VALID').
+                    deconv2d(5, 64, edges='VALID').
+                    deconv2d(5, 32, stride=2).
+                    deconv2d(5, 1, stride=2, activation_fn=tf.nn.sigmoid).
                     flatten()).tensor
 
     def encoder(self, inputs, latent_size, activ=tf.nn.elu, phase=pt.Phase.train):
@@ -130,13 +127,14 @@ class CVAE(object):
                                batch_normalize=True,
                                learned_moments_update_rate=0.0003,
                                variance_epsilon=0.001,
-                               scale_after_normalization=True,
-                               phase=phase):
+                               scale_after_normalization=True):
+                               #phase=phase):
             params = (pt.wrap(inputs).
                       reshape([-1, self.input_shape[0], self.input_shape[1], 1]).
                       conv2d(5, 32, stride=2).
                       conv2d(5, 64, stride=2).
                       conv2d(5, 128, edges='VALID').
+                      # dropout(0.9, phase=phase).
                       flatten().
                       fully_connected(self.latent_size * 2, activation_fn=None)).tensor
 
@@ -149,7 +147,7 @@ class CVAE(object):
 
         Return cost of mini-batch.
         """
-        inputs = Normalizer().fit_transform(inputs)
+        inputs = self.normalize(inputs)
         feed_dict = {self.inputs: inputs}
 
         if self.iteration % 10 == 0:
@@ -170,7 +168,7 @@ class CVAE(object):
         """
         # Note: This maps to mean of distribution, we could alternatively
         # sample from Gaussian distribution
-        inputs = Normalizer().fit_transform(inputs)
+        inputs = self.normalize(inputs)
         feed_dict={self.inputs: inputs}
         return sess.run(self.z_mean_test,
                         feed_dict=feed_dict)
@@ -186,12 +184,16 @@ class CVAE(object):
         return sess.run(self.x_reconstr_mean_test,
                         feed_dict=feed_dict)
 
+    def normalize(self, arr):
+        #return (arr - np.mean(arr)) / (np.std(arr) + 1e-9)
+        return arr
+
     def reconstruct(self, sess, X):
         """
         Use VAE to reconstruct given data.
         Taken from https://jmetzen.github.io/2015-11-27/vae.html
         """
-        X = Normalizer().fit_transform(X)
+        X = self.normalize(X)
         feed_dict={self.inputs: X}
         return sess.run(self.x_reconstr_mean_test,
                         feed_dict=feed_dict)
@@ -204,7 +206,6 @@ class CVAE(object):
             # Loop over all batches
             for i in range(total_batch):
                 batch_xs, _ = source.train.next_batch(batch_size)
-                #batch_xs = (batch_xs - np.mean(batch_xs)) / (np.var(batch_xs) + 1e-9)
 
                 # Fit training using batch data
                 cost = self.partial_fit(sess, batch_xs)
