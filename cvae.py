@@ -30,9 +30,11 @@ class CVAE(object):
 
             # z = mu + sigma * epsilon
             # epsilon is a sample from a N(0, 1) distribution
-            eps = tf.random_normal([batch_size, latent_size], 0.0, 1.0, dtype=tf.float32)
             with tf.variable_scope("z"): # Encode our data into z and return the mean and covariance
                 self.z_mean, self.z_log_sigma_sq = self.encoder(self.inputs, latent_size)
+                eps_batch = self.z_log_sigma_sq.get_shape().as_list()[0] \
+                            if self.z_log_sigma_sq.get_shape().as_list()[0] is not None else batch_size
+                eps = tf.random_normal([eps_batch, latent_size], 0.0, 1.0, dtype=tf.float32)
                 self.z = tf.add(self.z_mean,
                                 tf.mul(tf.sqrt(tf.exp(self.z_log_sigma_sq)), eps))
                 # Get the reconstructed mean from the decoder
@@ -42,6 +44,9 @@ class CVAE(object):
 
             with tf.variable_scope("z", reuse=True): # The test z
                 self.z_mean_test, self.z_log_sigma_sq_test = self.encoder(self.inputs, latent_size, phase=pt.Phase.test)
+                eps_batch = self.z_log_sigma_sq.get_shape().as_list()[0] \
+                            if self.z_log_sigma_sq.get_shape().as_list()[0] is not None else batch_size
+                eps = tf.random_normal([eps_batch, latent_size], 0.0, 1.0, dtype=tf.float32)
                 self.z_test = tf.add(self.z_mean_test,
                                      tf.mul(tf.sqrt(tf.exp(self.z_log_sigma_sq_test)), eps))
                 # Get the reconstructed mean from the decoder
@@ -112,14 +117,14 @@ class CVAE(object):
                                batch_normalize=True,
                                learned_moments_update_rate=0.0003,
                                variance_epsilon=0.001,
-                               scale_after_normalization=True):
-                               #phase=phase):
+                               scale_after_normalization=True,
+                               phase=phase):
             return (pt.wrap(z).
                     reshape([-1, 1, 1, self.latent_size]).
-                    deconv2d(3, 128, edges='VALID').
-                    deconv2d(5, 64, edges='VALID').
-                    deconv2d(5, 32, stride=2).
-                    deconv2d(5, 1, stride=2, activation_fn=tf.nn.sigmoid).
+                    deconv2d(3, 128, edges='VALID', phase=phase).
+                    deconv2d(5, 64, edges='VALID', phase=phase).
+                    deconv2d(5, 32, stride=2, phase=phase).
+                    deconv2d(5, 1, stride=2, activation_fn=tf.nn.sigmoid, phase=phase).
                     flatten()).tensor
 
     def encoder(self, inputs, latent_size, activ=tf.nn.elu, phase=pt.Phase.train):
@@ -127,14 +132,14 @@ class CVAE(object):
                                batch_normalize=True,
                                learned_moments_update_rate=0.0003,
                                variance_epsilon=0.001,
-                               scale_after_normalization=True):
-                               #phase=phase):
+                               scale_after_normalization=True,
+                               phase=phase):
             params = (pt.wrap(inputs).
                       reshape([-1, self.input_shape[0], self.input_shape[1], 1]).
                       conv2d(5, 32, stride=2).
                       conv2d(5, 64, stride=2).
                       conv2d(5, 128, edges='VALID').
-                      # dropout(0.9, phase=phase).
+                      #dropout(0.9).
                       flatten().
                       fully_connected(self.latent_size * 2, activation_fn=None)).tensor
 

@@ -1,2 +1,2 @@
-# CAE
-Tensorflow implementation of Convolutional Auto Enconders
+# CVAE
+Tensorflow implementation of Convolutional Variational Auto Enconders

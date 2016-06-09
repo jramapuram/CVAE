@@ -13,6 +13,11 @@ flags.DEFINE_boolean("allow_soft_placement", True, "Soft device placement.")
 flags.DEFINE_float("device_percentage", "0.5", "Amount of memory to use on device.")
 FLAGS = flags.FLAGS
 
+def normalize(arr):
+    #return (arr - np.mean(arr)) / (np.std(arr) + 1e-9)
+    #return arr/255.0
+    return arr
+
 def build_Nd_cvae(sess, source, input_shape, latent_size, batch_size, epochs=100):
     cvae = CVAE(sess, input_shape, batch_size, latent_size=latent_size)
     model_filename = "models/%s.cpkt" % cvae.get_name()
@@ -27,8 +32,17 @@ def build_Nd_cvae(sess, source, input_shape, latent_size, batch_size, epochs=100
 
 # show clustering in 2d
 def plot_2d_cvae(sess, source, cvae):
-    x_sample, y_sample = source.test.next_batch(10000)
-    z_mu = cvae.transform(sess, x_sample)
+    z_mu = []
+    y_sample = []
+    for _ in range(np.floor(10000.0 / FLAGS.batch_size).astype(int)):
+      x_sample, y = source.test.next_batch(FLAGS.batch_size)
+      z_mu.append(cvae.transform(sess, x_sample))
+      y_sample.append(y)
+
+    z_mu = np.vstack(z_mu)
+    y_sample = np.vstack(y_sample)
+    print 'z.shape = ', z_mu.shape, ' | y_sample.shape = ', y_sample.shape
+
     plt.figure(figsize=(8, 6))
     plt.scatter(z_mu[:, 0], z_mu[:, 1], c=np.argmax(y_sample, 1))
     plt.colorbar()
@@ -55,6 +69,8 @@ def plot_Nd_cvae(sess, source, cvae, batch_size):
 def main():
     from tensorflow.examples.tutorials.mnist import input_data
     mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
+    mnist.train._images = normalize(mnist.train.images)
+    mnist.test._images = normalize(mnist.test.images)
     input_shape = int(np.sqrt(mnist.train.images.shape[1])), \
                   int(np.sqrt(mnist.train.images.shape[1]))
 
@@ -75,7 +91,7 @@ def main():
             if FLAGS.latent_size == 2:
                 plot_2d_cvae(sess, mnist, cvae)
             else:
-                plot_Nd_cvae(sess, mnist, cvae, FLAGS.batch_size)
+              plot_Nd_cvae(sess, mnist, cvae, FLAGS.batch_size)
 
 if __name__ == "__main__":
     main()
